@@ -19,11 +19,22 @@ export const analyzeMetadata = (file: File): Promise<MetadataResult> => {
                     software = allTags.Software;
                     details.push(`Software detected: ${software}`);
 
-                    // Known AI generators or editing tools
-                    const suspiciousSoftware = ["Adobe Photoshop", "GIMP", "Stable Diffusion", "Midjourney"];
-                    if (suspiciousSoftware.some(s => software.includes(s))) {
-                        score += 0.4;
-                        details.push("Suspicious software signature found.");
+                    // Known AI generators or editing tools (expanded list)
+                    const aiGenerators = [
+                        "Stable Diffusion", "Midjourney", "DALL-E", "DALL·E",
+                        "NovelAI", "Imagen", "Firefly", "Leonardo.Ai",
+                        "DreamStudio", "Craiyon", "NightCafe", "Artbreeder",
+                        "RunwayML", "Playground", "Blue Willow"
+                    ];
+
+                    const editingSoftware = ["Adobe Photoshop", "GIMP", "Affinity Photo"];
+
+                    if (aiGenerators.some(s => software.includes(s))) {
+                        score += 0.9; // Very strong AI indicator
+                        details.push("AI generation software detected!");
+                    } else if (editingSoftware.some(s => software.includes(s))) {
+                        score += 0.3; // Could be edited
+                        details.push("Image editing software detected.");
                     }
                 } else {
                     // AI images often lack Software tags or have very minimal metadata

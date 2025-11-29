@@ -116,16 +116,23 @@ export const analyzeFFT = async (img: HTMLImageElement): Promise<FFTResult> => {
     }
 
     // Heuristic:
-    // AI images (GANs) often have bright spots (high magnitude) in high frequencies (outer regions)
-    // or specific grid patterns.
+    // AI images (GANs/Diffusion) often have:
+    // 1. Bright spots (high magnitude) in high frequencies
+    // 2. Specific grid patterns (periodic artifacts)
+    // 3. Unusually smooth frequency spectrum (over-smoothed)
 
-    // We will calculate the energy in the "High Frequency" region vs "Low Frequency" region.
-    // Low Freq: Center circle. High Freq: Corners/Edges.
-
+    // We will calculate the energy in different frequency bands
     let totalEnergy = 0;
+    let lowFreqEnergy = 0;
+    let midFreqEnergy = 0;
     let highFreqEnergy = 0;
     const center = size / 2;
-    const lowFreqRadius = size / 8; // Inner circle
+    const innerRadius = size / 8;  // Low frequency
+    const midRadius = size / 4;    // Mid frequency
+
+    // Also track peak detection for grid artifacts
+    const peaks: Array<{ x: number, y: number, mag: number }> = [];
+    const peakThreshold = maxMag * 0.7; // Significant peaks
 
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
@@ -137,42 +144,105 @@ export const analyzeFFT = async (img: HTMLImageElement): Promise<FFTResult> => {
 
             totalEnergy += mag;
 
-            if (dist > lowFreqRadius) {
+            if (dist <= innerRadius) {
+                lowFreqEnergy += mag;
+            } else if (dist <= midRadius) {
+                midFreqEnergy += mag;
+            } else {
                 highFreqEnergy += mag;
+            }
+
+            // Detect peaks (excluding DC component at center)
+            if (dist > 5 && mag > peakThreshold) {
+                peaks.push({ x, y, mag });
             }
         }
     }
 
+    const lowFreqRatio = lowFreqEnergy / totalEnergy;
+    const midFreqRatio = midFreqEnergy / totalEnergy;
     const highFreqRatio = highFreqEnergy / totalEnergy;
-
-    // Typical natural images have most energy in low frequencies (ratio is low).
-    // AI images with checkerboard artifacts have more energy in high frequencies.
-    // Also, if the image is too smooth (denoised), high freq energy might be abnormally low?
-    // Actually, GAN artifacts usually manifest as *peaks* in high freq.
-
-    // Let's look for "spikes" in high freq.
-    // Calculate variance of high freq magnitude?
-
-    // Simplified Heuristic for this demo:
-    // If high freq ratio is unusually high (> 0.85), it might be noisy or AI artifacts.
-    // If it's unusually low (< 0.5), it might be too smooth (AI).
 
     let score = 0;
 
-    // Tuning these thresholds is tricky without a dataset.
-    // But generally, AI images have specific "peaks".
-    // Let's stick to the "Too Smooth" vs "Artifacts" check.
+    // 1. Check frequency distribution
+    // Natural images have most energy in low frequencies
+    // AI images can be too smooth (very high low freq ratio) or have artifacts (high freq peaks)
 
-    if (highFreqRatio > 0.90) {
-        score += 0.3; // Very high frequency noise (could be grain or artifacts)
-    } else if (highFreqRatio < 0.6) {
-        score += 0.5; // Unusually smooth (AI often suppresses texture)
+    if (lowFreqRatio > 0.95) {
+        score += 0.5; // Too smooth, over-denoised (common in AI)
+    } else if (lowFreqRatio < 0.7) {
+        score += 0.2; // Unusual distribution
     }
 
-    // Check for specific "Grid" artifacts (peaks at regular intervals)
-    // This is hard to do robustly in 1 pass.
+    // 2. Check for high frequency artifacts
+    if (highFreqRatio > 0.15) {
+        score += 0.4; // Significant high frequency content (artifacts)
+    }
 
-    // Let's just return a moderate score if we detect "smoothness" which correlates with the ELA "clean" check.
+    // 3. Detect grid patterns (periodic artifacts from GANs)
+    // Look for symmetric peaks or regularly spaced peaks
+    const gridPatterns = [];
+
+    for (let i = 0; i < peaks.length; i++) {
+        for (let j = i + 1; j < peaks.length; j++) {
+            const dx = peaks[i].x - center;
+            const dy = peaks[i].y - center;
+            const dx2 = peaks[j].x - center;
+            const dy2 = peaks[j].y - center;
+
+            // Check for symmetry (opposite sides of center)
+            if (Math.abs(dx + dx2) < 5 && Math.abs(dy + dy2) < 5) {
+                gridPatterns.push({ peak1: peaks[i], peak2: peaks[j] });
+            }
+
+            // Check for regular spacing (grid)
+            const spacing1 = Math.sqrt(dx * dx + dy * dy);
+            const spacing2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+            if (Math.abs(spacing1 - spacing2) < spacing1 * 0.1) {
+                const angle1 = Math.atan2(dy, dx);
+                const angle2 = Math.atan2(dy2, dx2);
+                const angleDiff = Math.abs(angle1 - angle2);
+
+                // Check if angles are multiples of 90 degrees (grid pattern)
+                const normalizedAngle = angleDiff % (Math.PI / 2);
+                if (normalizedAngle < 0.2 || normalizedAngle > Math.PI / 2 - 0.2) {
+                    gridPatterns.push({ peak1: peaks[i], peak2: peaks[j] });
+                }
+            }
+        }
+    }
+
+    if (gridPatterns.length > 3) {
+        score += 0.5; // Detected grid patterns (strong GAN indicator)
+    } else if (gridPatterns.length > 0) {
+        score += 0.2;
+    }
+
+    // 4. Check for specific "checkerboard" artifact frequencies
+    // Checkerboard appears at Nyquist frequency (corners)
+    let cornerEnergy = 0;
+    const cornerSize = size / 16;
+
+    const corners = [
+        { x: 0, y: 0 },
+        { x: size - cornerSize, y: 0 },
+        { x: 0, y: size - cornerSize },
+        { x: size - cornerSize, y: size - cornerSize }
+    ];
+
+    for (const corner of corners) {
+        for (let y = corner.y; y < corner.y + cornerSize; y++) {
+            for (let x = corner.x; x < corner.x + cornerSize; x++) {
+                cornerEnergy += magnitude[y * size + x];
+            }
+        }
+    }
+
+    const cornerRatio = cornerEnergy / totalEnergy;
+    if (cornerRatio > 0.05) {
+        score += 0.4; // Significant corner energy (checkerboard artifacts)
+    }
 
     return {
         score: Math.max(0, Math.min(1, score)),
